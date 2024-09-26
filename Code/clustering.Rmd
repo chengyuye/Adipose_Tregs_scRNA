@@ -1,0 +1,728 @@
+---
+title: "Data_Integration_adipose"
+output: html_document
+author: "Chengyu Ye"
+date: "2022-12-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# if errors, keep knitting
+knitr::opts_chunk$set(error = TRUE)
+
+# hide messages and warnings
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+## load required libraries
+
+```{r}
+library(Seurat)
+library(harmony)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(RColorBrewer)
+library(patchwork)
+library(umap)
+library(reticulate)
+library(scRepertoire)
+library(gprofiler2)
+library(sctransform)
+```
+
+## prepare the R environment
+### set up working directory
+
+```{r}
+data_path <- "/Users/chengyuye/Library/CloudStorage/OneDrive-EmoryUniversity/Rotation_2_Li Lab/scRNA_TCR/Data/processed_data/seurat_update/"
+
+figure.path <- "/Users/chengyuye/Library/CloudStorage/OneDrive-EmoryUniversity/Rotation_2_Li Lab/scRNA_TCR/Figures/adipose/"
+
+```
+
+### Read in wt, ko data
+
+```{r}
+adipo_wt <- readRDS('../../Data/processed_data/adipose/seurat_update/WT_adipose_afterQC.rds')
+
+adipo_ko <- readRDS('../../Data/processed_data/adipose/seurat_update/Srebf2KO_adipose_afterQC.rds')
+
+```
+
+## Data processing
+### Merge data
+
+```{r}
+adipose <- merge(adipo_wt, adipo_ko)
+```
+
+
+### use SCTransform
+
+```{r}
+# adipose<-SCTransform(adipose,method="glmGamPoi",
+#                      vars.to.regress=c("percent.mt",'percent.rb'),
+#                      verbose=FALSE)
+```
+
+### Normalization 
+
+```{r}
+adipose <- NormalizeData(adipose, 
+                         normalization.method = "LogNormalize", 
+                         scale.factor = 10000)
+```
+
+### feature selection: HVGs -----method 2
+
+```{r}
+adipose <- FindVariableFeatures(adipose, selection.method = "vst", nfeatures = 2000)
+```
+
+
+### scale data ###
+
+```{r}
+adipose <- ScaleData(adipose) # uncorrected
+```
+
+### dimensionality reduction: PCA ###
+
+```{r}
+adipose <- RunPCA(adipose, features = VariableFeatures(object = adipose))
+
+```
+
+### elbow plot - determing optimal PCs
+
+```{r}
+pca.elbow.plot <- ElbowPlot(adipose, ndims = 50, reduction = "pca")
+# png(paste0(figure_path,"pca.elbow.plot.png"), width=1000,height=600,units="px")
+# print(pca.elbow.plot)
+# dev.off()
+```
+
+### visualize PCs
+
+```{r}
+PC1_2.condition.plot <- DimPlot(object = adipose, reduction = "pca", pt.size = .1, group.by = "Group")
+# png(paste0(figure_path,"PC1_2.condition.png"), width=1000,height=1000,units="px")
+# print(PC1_2.condition.plot)
+# dev.off()
+```
+
+### save genes making up the PCs  
+
+```{r}
+# sink(paste0(figure_path, "PC_genes.txt"))
+# print(adipose[["pca"]], dims = 1:50, nfeatures = 20)
+# sink()
+```
+
+### assignment the cell cycle score
+
+```{r}
+# # A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can segregate this list into markers of G2/M phase and markers of S phase
+# mmus_s = gorth(cc.genes.updated.2019$s.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+# mmus_g2m = gorth(cc.genes.updated.2019$g2m.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+# 
+# adipose <- CellCycleScoring(adipose, s.features = mmus_s, g2m.features = mmus_g2m, set.ident = TRUE)
+
+```
+
+### visulization
+
+```{r}
+# Running a PCA on cell cycle genes reveals, unsurprisingly, that cells separate entirely by
+# phase
+adipose <- RunPCA(adipose, features = c(mmus_s, mmus_g2m))
+DimPlot(adipose)
+```
+## scaling again ----- regress out the cell cycle genes
+
+```{r}
+#adipose <- ScaleData(adipose, vars.to.regress = c("S.Score", "G2M.Score"))
+```
+### run PCA again
+
+```{r}
+#adipose <- RunPCA(adipose, features = VariableFeatures(object = adipose))
+```
+
+
+## Batch effects correction
+### integration with harmony
+
+```{r}
+adipose.harmony <- adipose %>% 
+  RunHarmony("Group", theta = 2, 
+             reduction.save ="harmony_theta2", 
+             plot_convergence = TRUE) 
+
+```
+
+### harmony elbow plot 
+
+```{r}
+harmony.elbow.plot <- ElbowPlot(adipose.harmony, ndims = 50, reduction = "harmony_theta2")
+# png(paste0(figure_path,"harmony_theta2.elbow.plot.png"), width=1000,height=600,units="px")
+# print(harmony.elbow.plot)
+# dev.off()
+```
+
+
+
+### visualize PCs ##
+
+```{r}
+harmony.PC1_2.condition.plot <- DimPlot(object = adipose.harmony, reduction = "harmony_theta2", pt.size = .1, group.by = "Group")
+# png(paste0(figure_path,"harmony_theta2.PC1_2.condition.png"), width=1000,height=1000,units="px")
+# print(harmony.PC1_2.condition.plot)
+# dev.off()
+
+```
+
+### save genes making up the PCs 
+
+```{r}
+# sink(paste0(figure_path, "harmony_PC_genes.txt"))
+# print(adipose.harmony[["harmony_theta2"]], dims = 1:50, nfeatures = 20)
+# sink()
+```
+
+
+### save data
+
+```{r}
+saveRDS(adipose.harmony, paste0(data_path, "all_adipose_harmony.rds"))
+```
+
+## preliminary clustering 
+### select 30 PCs 
+```{r}
+adipose.harmony <- FindNeighbors(adipose.harmony, reduction = "harmony_theta2", dims = 1:30)
+adipose.harmony <- FindClusters(adipose.harmony, reduction = "harmony_theta2", resolution = 0.5)
+
+# run UMAP
+adipose.harmony <- RunUMAP(adipose.harmony, reduction = "harmony_theta2", dims=1:30, seed.use=1)
+```
+
+### Visualization
+
+```{r}
+## overview
+p1 <- DimPlot(adipose.harmony, reduction = "umap", 
+        label = T, pt.size = 0.4)
+
+## save 
+#ggsave("Umap_overall_res0.5.pdf", p1, path = figure_path, height = 7, width = 8)
+
+
+## split by Group
+p2 <- DimPlot(adipose.harmony, reduction = "umap", split.by = "Group",pt.size = 0.4, ncol = 2, label = T)
+
+## save 
+#ggsave("Umap_splitbyGroup_res0.5.pdf", p2, path = figure_path, height = 7, width = 12)
+
+
+## group by Group
+p3 <- DimPlot(adipose.harmony, reduction = "umap", group.by = "Group", pt.size = 0.4)
+
+#ggsave("Umap_groupbyGroup_res0.5.pdf", p3, path = figure_path, height = 7, width = 8)
+
+## compare wt and ko
+p4 <- DimPlot(adipose.harmony, reduction = "umap", split.by = "Group", group.by = "Group", pt.size = 0.01) + NoLegend() + scale_color_viridis(discrete=TRUE)
+```
+
+### check Srebf2 gene expression
+
+```{r}
+p5 <- FeaturePlot(adipose.harmony, features = 'Srebf2', split.by = 'Group')
+
+#ggsave("featureplot_st2_cd73_res0.5.pdf", p5, path = figure_path, height = 7, width = 8)
+```
+
+### check ST2 and CD73
+
+```{r}
+FeaturePlot(adipose.harmony, features = c('Il1rl1', 'Nt5e'), split.by = 'Group')
+
+p6 <- FeaturePlot(adipose.harmony, features = c('Il1rl1', 'Nt5e'), split.by = 'Group', label = T)
+
+#ggsave("featureplot_st2_cd73_res0.5.pdf", p6, path = figure.path, height = 12, width = 12)
+```
+
+
+### compute cluster marker genes
+```{r}
+ad.markers <- FindAllMarkers(adipose.harmony, only.pos =TRUE , min.pct = 0.25, logfc.threshold = 0.25) 
+```
+
+
+### check top10 marker gene
+```{r}
+top10_markers <- ad.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+marker_heatmap <- DoHeatmap(adipose.harmony, features = top10_markers$gene) + NoLegend()
+
+## save 
+#ggsave("cluster_marker_top10.pdf", marker_heatmap, path = figure_path, height = 10, width = 12)
+
+## save the marker gene list
+# write.csv(top10_markers, file = paste0(figure_path,"top10_marker_genes_res0.5.csv" ))
+# 
+# write.csv(ad.markers, file = paste0(figure_path,"all_marker_genes_res0.5.csv" ))
+```
+
+
+```{r}
+## check cd4 and foxp3
+p11 <- FeaturePlot(adipose.harmony, features = c('Cd4','Foxp3'), label = T,  split.by = "Group")
+
+#ggsave("featureplot_cd4_Foxp3_res0.5.pdf", p11, path = figure.path, height = 10, width = 12)
+
+```
+
+```{r}
+VlnPlot(adipose.harmony, split.by = "Group", features = 'Srebf2')
+```
+### remove cluster 6,7 and 8
+
+```{r}
+adipose.harmony.subset <- subset(adipose.harmony, idents = c('6','7','8'), invert = T)
+```
+
+## re-run the pipeline
+
+```{r}
+adipose.harmony.subset <- NormalizeData(adipose.harmony.subset, 
+                         normalization.method = "LogNormalize", 
+                         scale.factor = 10000)
+
+
+adipose.harmony.subset <- FindVariableFeatures(adipose.harmony.subset, selection.method = "vst", nfeatures = 2000)
+
+
+adipose.harmony.subset <- ScaleData(adipose.harmony.subset)
+
+adipose.harmony.subset <- RunPCA(adipose.harmony.subset, features = VariableFeatures(adipose.harmony.subset))
+```
+
+### re-run harmony
+```{r}
+adipose.harmony.subset <- adipose.harmony.subset %>% 
+  RunHarmony("Group", theta = 2, 
+             reduction.save ="harmony_theta2", 
+             plot_convergence = TRUE) 
+```
+```{r}
+harmony.elbow.plot <- ElbowPlot(adipose.harmony.subset, ndims = 50, reduction = "harmony_theta2")
+#png(paste0(figure_path,"subset_harmony_theta2.elbow.plot.png"), width=1000,height=600,units="px")
+#print(harmony.elbow.plot)
+#dev.off()
+```
+
+
+## re-run clustering
+```{r}
+adipose.harmony.subset <- FindNeighbors(adipose.harmony.subset, reduction = "harmony_theta2", dims = 1:30)
+adipose.harmony.subset <- FindClusters(adipose.harmony.subset, reduction = "harmony_theta2", resolution = 0.4)
+
+# run UMAP
+adipose.harmony.subset <- RunUMAP(adipose.harmony.subset, reduction = "harmony_theta2", dims=1:30, seed.use=1)
+```
+
+
+### visulization
+
+```{r}
+## overview
+p1 <- DimPlot(adipose.harmony.subset, reduction = "umap", 
+        label = T, pt.size = 0.5)
+
+## save 
+#ggsave("Subset_Umap_overall_res0.3.pdf", p1, path = figure_path, height = 7, width = 8)
+
+
+## split by Group
+p2 <- DimPlot(adipose.harmony.subset, reduction = "umap", split.by = "Group",pt.size = 0.4, ncol = 2, label = T)
+
+## save 
+#ggsave("Subset_Umap_splitbyGroup_res0.3.pdf", p2, path = figure_path, height = 7, width = 12)
+
+
+## group by Group
+p3 <- DimPlot(adipose.harmony.subset, reduction = "umap", group.by = "Group", pt.size = 0.4)
+
+#ggsave("Subset_Umap_groupbyGroup_res0.3.pdf", p3, path = figure_path, height = 7, width = 8)
+
+## compare wt and ko
+p4 <- DimPlot(adipose.harmony.subset, reduction = "umap", split.by = "Group", group.by = "Group", pt.size = 0.01) + NoLegend() + scale_color_viridis(discrete=TRUE)
+```
+
+### check the top10 marker genes
+
+```{r}
+ad_subset.markers <- FindAllMarkers(adipose.harmony.subset, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) 
+
+top10_markers <- ad_subset.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+top20_markers <- ad_subset.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC)
+
+top30_markers <- ad_subset.markers %>% group_by(cluster) %>% top_n(n = 30, wt = avg_log2FC)
+
+marker_heatmap <- DoHeatmap(adipose.harmony.subset, features = top10_markers$gene) + NoLegend()
+
+marker_heatmap_top20 <- DoHeatmap(adipose.harmony.subset, features = top20_markers$gene) + NoLegend()
+
+marker_heatmap_top30 <- DoHeatmap(adipose.harmony.subset, features = top30_markers$gene) + NoLegend()
+
+# ## save 
+# ggsave("Subset_cluster_marker_top10_res0.3.pdf", marker_heatmap, path = figure_path, height = 10, width = 12)
+# 
+# ggsave("Subset_cluster_marker_top20_res0.3.pdf", marker_heatmap_top20, path = figure_path, height = 15, width = 12)
+# 
+# ggsave("Subset_cluster_marker_top30_res0.3.pdf", marker_heatmap_top30, path = figure_path, height = 18, width = 12)
+
+# ## save the marker gene list
+# write.csv(top10_markers, file = paste0(figure_path,"Subset_top10_marker_genes_res0.3.csv" ))
+# 
+# write.csv(top20_markers, file = paste0(figure_path,"Subset_top20_marker_genes_res0.3.csv" ))
+# 
+# write.csv(top30_markers, file = paste0(figure_path,"Subset_top30_markers_genes_res0.3.csv" ))
+# 
+# write.csv(ad_subset.markers, file = paste0(figure_path,"Subset_all_markers_genes_res0.3.csv" ))
+
+```
+
+### remove the cluster 4
+
+```{r}
+
+adipose.harmony.subset <- subset(adipose.harmony.subset, idents = '4', invert = T)
+
+
+```
+
+### re-run the umap
+
+```{r}
+
+# run UMAP
+adipose.harmony.subset <- RunUMAP(adipose.harmony.subset, reduction = "harmony_theta2", dims=1:30, seed.use=1)
+```
+### dimplot
+
+```{r}
+## overview
+p1 <- DimPlot(adipose.harmony.subset, reduction = "umap", 
+        label = T, pt.size = 0.6) + scale_color_d3()
+
+## save 
+# ggsave("Umap_overall_res0.4_final.pdf", p1, path = figure_path, height = 6, width = 7)
+
+
+## split by Group
+p2 <- DimPlot(adipose.harmony.subset, reduction = "umap", split.by = "Group",pt.size = 0.6, ncol = 2, label = T) + scale_color_d3()
+
+## save 
+# ggsave("Umap_splitbyGroup_res0.4_final.pdf", p2, path = figure_path, height = 6, width = 12)
+
+
+## group by Group
+p3 <- DimPlot(adipose.harmony.subset, reduction = "umap", group.by = "Group", pt.size = 0.6) + scale_color_d3()
+
+# ggsave("Umap_groupbyGroup_res0.4_final.pdf", p3, path = figure_path, height = 6, width = 7)
+
+```
+
+```{r}
+ad_subset.markers <- FindAllMarkers(adipose.harmony.subset, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) 
+
+top10_markers <- ad_subset.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+top20_markers <- ad_subset.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC)
+
+top30_markers <- ad_subset.markers %>% group_by(cluster) %>% top_n(n = 30, wt = avg_log2FC)
+
+marker_heatmap <- DoHeatmap(adipose.harmony.subset, features = top10_markers$gene) + NoLegend()
+
+marker_heatmap_top20 <- DoHeatmap(adipose.harmony.subset, features = top20_markers$gene) + NoLegend()
+
+marker_heatmap_top30 <- DoHeatmap(adipose.harmony.subset, features = top30_markers$gene) + NoLegend()
+
+# ## save 
+# ggsave("Subset_cluster_marker_top10_res0.3_final.pdf", marker_heatmap, path = figure_path, height = 10, width = 12)
+# 
+# ggsave("Subset_cluster_marker_top20_res0.3_final.pdf", marker_heatmap_top20, path = figure_path, height = 15, width = 12)
+# 
+# ggsave("Subset_cluster_marker_top30_res0.3_final.pdf", marker_heatmap_top30, path = figure_path, height = 18, width = 12)
+
+# ## save the marker gene list
+# write.csv(top10_markers, file = paste0(figure_path,"Subset_top10_marker_genes_res0.3_final.csv" ))
+# 
+# write.csv(top20_markers, file = paste0(figure_path,"Subset_top20_marker_genes_res0.3.csv" ))
+# 
+# write.csv(top30_markers, file = paste0(figure_path,"Subset_top30_markers_genes_res0.3.csv" ))
+# 
+# write.csv(ad_subset.markers, file = paste0(figure_path,"Subset_all_markers_genes_res0.3.csv" ))
+```
+
+
+### density plot
+
+
+```{r}
+# library(ggpointdensity)
+# ### extracting umap infor for figures---- celltypes
+# data = cbind(Embeddings(object = adipose.harmony.subset[['umap']]), 
+#              FetchData(adipose.harmony.subset, c('Group','seurat_clusters')))
+# 
+# data_bg <- data[,-(which(colnames(data)=="Group"))]
+# 
+# density_plot <- ggplot(data = data, aes(x = UMAP_1,
+#                                         y = UMAP_2,
+#                                         color = seurat_clusters)) +
+#   geom_pointdensity(method="kde2d")+
+#   #geom_point(size = 0.5 , alpha =1)+
+#   scale_fill_viridis()+
+#   facet_wrap(~Group)
+# 
+# # calculate density normalized to 1, independently for each facet variable
+# plot_density_split <- function(metadata_tbl, x_var, y_var, split_var, num_bins) {
+#   # ran into some issues with merging split geom_hex
+#   ggplot(metadata_tbl, aes(x = !!sym(x_var), y = !!sym(y_var))) +
+#     # geom_hex(aes(fill = stat(ndensity)), bins = num_bins) +
+#     stat_bin_2d(aes(fill = stat(ndensity)), bins = num_bins) +
+#     theme(
+#       aspect.ratio = 1,
+#       axis.ticks = element_blank(),
+#       axis.text = element_blank(),
+#       strip.background = element_blank()
+#     ) +
+#     scale_fill_gradient2(low = "white", high = "darkred") +
+#     facet_wrap(vars(!!sym(split_var)))
+# }
+# 
+# 
+# # get table for density plot
+# get_density_diff_table <- function(metadata_tbl, x_var, y_var, split_var, num_bins){
+#   # generate a density plot split by stage
+#   density_plot = plot_density_split(metadata_tbl = metadata_tbl, x_var = x_var, y_var = y_var, split_var = split_var, num_bins = num_bins)
+#   # produce an object that can be rendered
+#   density_plot_tbl = ggplot_build(density_plot)
+#   # panel labels
+#   panels_tbl =
+#     tibble(
+#       PANEL = density_plot_tbl$layout$layout$PANEL,
+#       stage = density_plot_tbl$layout$layout$orig.ident
+#     )
+#   # merge panel contents and panel names
+#   density_tbl = density_plot_tbl$data[[1]]
+#   density_tbl = density_tbl %>% full_join(panels_tbl, by = "PANEL")
+#   return(density_tbl)
+# }
+# 
+# #density plot split by specified variable
+# #min_density = quantile(density_tbl$density, 0)
+# plot_density_diff <- function(metadata_tbl, x_var = "UMAP_1", y_var = "UMAP_2", split_var, num_bins, group_pos, group_neg, interpolate = FALSE) {
+#   
+#   density_tbl = get_density_diff_table(metadata_tbl = metadata_tbl, 
+#                                        x_var = x_var, y_var = y_var, 
+#                                        split_var = split_var, num_bins = num_bins
+#   )
+#   min_density = quantile(density_tbl$density, 0)
+#   density_pos_tbl =
+#     density_tbl %>%
+#     filter(stage == group_pos) %>%
+#     select(x, y, cells_pos = count, density_pos = density)
+#   density_neg_tbl =
+#     density_tbl %>%
+#     filter(stage == group_neg) %>%
+#     select(x, y, cells_neg = count, density_neg = density)
+#   density_split_tbl = full_join(density_pos_tbl, density_neg_tbl, by = c("x", "y"))
+#   density_split_tbl[is.na(density_split_tbl)] = min_density
+#   density_split_tbl = density_split_tbl %>% mutate(density_diff = density_pos - density_neg)
+#   density_split_tbl = density_split_tbl %>% mutate(density_ratio = log(density_pos/density_neg))
+#   
+#   min_density_diff = density_split_tbl %>% pull(density_diff) %>% quantile(0.01)
+#   max_density_diff = density_split_tbl %>% pull(density_diff) %>% quantile(0.99)
+#   min_density_ratio = density_split_tbl %>% pull(density_ratio) %>% quantile(0.01)
+#   max_density_ratio = density_split_tbl %>% pull(density_ratio) %>% quantile(0.99)
+#   
+#   density_split_tbl =
+#     density_split_tbl %>%
+#     mutate(
+#       cells = cells_pos + cells_neg,
+#       log_density = log(density_pos + density_neg),
+#       density_ratio = if_else(density_ratio < min_density_ratio, min_density_ratio, density_ratio),
+#       density_ratio = if_else(density_ratio > max_density_ratio, max_density_ratio, density_ratio)
+#     ) %>%
+#     filter(cells > 0)
+#   
+#   ggplot(density_split_tbl, aes(x = x, y = y)) +
+#     # geom_tile(aes(fill = density_ratio)) +
+#     geom_raster(aes(fill = density_ratio), interpolate = interpolate) +
+#     theme(
+#       aspect.ratio = 1,
+#       axis.ticks = element_blank(),
+#       axis.text = element_blank()
+#     ) +
+#     labs(title = glue("{group_pos} vs {group_neg}"), x = x_var, y = y_var) +
+#     scale_fill_gradient2(low = "#352a86", mid = "#41b899", high = "#f8fa0d")
+# }
+# 
+# 
+# new.dat <- cbind(adipose.harmony.subset@reductions$umap@cell.embeddings,
+#                  adipose.harmony.subset@meta.data)
+# pdd <- plot_density_diff(new.dat, x_var = "UMAP_1", y_var = "UMAP_2", "seurat_clusters", 100, "Srebf2WT", "Srebf2KO", interpolate = FALSE) 
+
+```
+
+```{r}
+
+#     get_density <- function(x, y, ...) {
+#         dens <- MASS::kde2d(x, y, ...)
+#         ix <- findInterval(x, dens$x)
+#         iy <- findInterval(y, dens$y)
+#         ii <- cbind(ix, iy)
+#         return(dens$z[ii])
+#     }
+# 
+# meta <- adipose.harmony.subset@meta.data
+# meta[['barcode']] <- rownames(meta)
+# #
+# umap_dat <- data.frame(adipose.harmony.subset@reductions$umap@cell.embeddings)
+# dim(umap_dat)
+# umap_dat[['barcode']] <- rownames(umap_dat)
+# #
+# umap_dat <- merge(umap_dat, meta, by = "barcode")
+# rownames(umap_dat) <- umap_dat[['barcode']]
+# print(head(umap_dat[, 1:10], 2))
+# #
+# groupvar_levels <- unique(umap_dat[['Group']]) 
+# print(groupvar_levels)
+# 
+# 
+# dens_plots <- Reduce(rbind,
+# 		     lapply(groupvar_levels, function(l) {
+# 			print(l)
+# 			sub_umap_mat <- filter(umap_dat, !!rlang::sym('Group') == l)
+# 			print(nrow(sub_umap_mat))
+# 			l_cells <- sub_umap_mat[['barcode']]
+# 			x <- umap_dat[l_cells, 'UMAP_1']
+# 			y <- umap_dat[l_cells, 'UMAP_2']
+# 			d <- get_density(x, y, n = 100)
+# 			sub_umap_mat[['dens_2d_grvar']] <- d
+# 			sub_umap_mat
+# 		})
+# 	)
+# dens_plots[['2d_dens_all']] <- get_density(dens_plots[['UMAP_1']], dens_plots[['UMAP_2']], n = 100)
+# dens_plots[['diff_dens']] <-  dens_plots[['dens_2d_grvar']] - dens_plots[['2d_dens_all']]
+# 
+# g <- ggplot(dens_plots, aes(x = UMAP_1, y = UMAP_2)) +
+# 	geom_point(aes(color = dens_2d_grvar), 
+# 		   size = 0.8) +
+# 	theme_classic() +
+# 	scale_color_viridis()+
+# 	facet_wrap(as.formula(paste0("~", 'Group')))
+# 
+# ## save the file 
+# ggsave("cell_density_splity_by_group_final.pdf", g, path = figure_path, height = 6, width = 12)
+# 
+# g <- ggplot(dens_plots, aes(x = UMAP_1, y = UMAP_2)) +
+# 	geom_point(aes(color = diff_dens), 
+# 		   size = 1,
+# 		   alpha = 0.8) +
+# 	theme_classic() +
+# 	scale_color_viridis()
+# 	#facet_wrap(as.formula(paste0("~", 'Group')))
+# 
+# ## save the file 
+# ggsave("cell_density_group_final.pdf", g, path = figure_path, height = 6, width = 7)
+# 
+# 
+# 
+# 
+# 
+# gd <- get_density(data$UMAP_1, data$UMAP_2, n = 100)
+# data['Density'] <- gd/max(gd)
+# 
+# 
+# res <- ggplot(data,aes(x = UMAP_1,y = UMAP_2, col = Density)) +
+#                 geom_point(size = 0.5, alpha = 1) +
+#                 #theme_classic(base_size = font_size) +
+#                 #facet_grid(as.formula(paste0('~',row_variable))) +
+#                 facet_wrap(~Group)+
+#                 scale_colour_viridis() +
+#                 theme(legend.position = 'bottom',
+#                       strip.text.y.right = element_text(angle = 0),
+#                       strip.text = element_text(size = 4)) +
+#                 guides(color = guide_colorbar(title.vjust = 1,
+#                                               barwidth = 12,
+#                                               barheight = 1.5))
+
+```
+
+
+
+### cell percentage
+
+```{r}
+# table(adipose.harmony.subset$Group)
+# prop.table(table(Idents(adipose.harmony.subset)))
+# table(Idents(adipose.harmony.subset), adipose.harmony.subset$Group)#
+# 
+# Cellratio <- prop.table(table(Idents(adipose.harmony.subset), adipose.harmony.subset$Group), margin = 2)#
+# 
+# Cellratio <- as.data.frame(Cellratio)
+#  
+# allcolour=c("#DC143C","#0000FF","#20B2AA","#FFA500","#9370DB","#98FB98","#F08080","#1E90FF","#7CFC00","#FFFF00",
+#             "#808000","#FF00FF","#FA8072","#7B68EE","#9400D3","#800080","#A0522D","#D2B48C","#D2691E","#87CEEB","#40E0D0","#5F9EA0",
+#             "#FF1493","#0000CD","#008B8B","#FFE4B5","#8A2BE2","#228B22","#E9967A","#4682B4","#32CD32","#F0E68C","#FFFFE0","#EE82EE",
+#             "#FF6347","#6A5ACD","#9932CC","#8B008B","#8B4513","#DEB887")
+# 
+# colnames(Cellratio) <- c("Cluster", "Sample","Freq") 
+# 
+# stack_percent <- ggplot(Cellratio) + 
+#   geom_bar(aes(x =Sample, y= Freq, fill = Cluster),
+#            stat = "identity",width = 0.7,size = 0.5,
+#            colour = '#222222')+ 
+#   theme_classic() +
+#   labs(x='Sample',y = 'Ratio')+
+#   scale_fill_manual(values = allcolour)+
+#   theme(panel.border = element_rect(fill=NA,color="black", size=0.5, linetype="solid"))
+# 
+# stack_percent <- stack_percent + scale_fill_npg()
+# 
+# ## save the file 
+# ggsave("Subset_stack_percentage_res0.4.pdf", stack_percent, path = figure.path, height = 5, width = 5)
+```
+
+### save the data 
+
+```{r}
+#saveRDS(adipose.harmony.subset, '../Data/processed_data/seurat_update/subset_adipose_harmony_final.rds')
+```
+
+### change to h5ad file for scirpy
+
+```{r}
+# library(sceasy)
+# library(reticulate)
+# use_condaenv('single-cell')
+# 
+# 
+# sceasy::convertFormat(adipose.harmony.subset, 
+#                       from="seurat", to="anndata",
+#                   outFile='../Data/processed_data/seurat_update/subset_adipose_harmony_final.h5ad')
+# 
+# 
+# sceasy::convertFormat(adipose.harmony.subset, 
+#                       from="seurat", to="anndata",
+#                   outFile='../Data/processed_data/seurat_update/subset_adipose_harmony_res0.4_final.h5ad')
+```
+

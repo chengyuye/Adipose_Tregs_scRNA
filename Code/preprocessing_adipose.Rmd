@@ -1,0 +1,286 @@
+---
+title: "preprocessing_adipose"
+output: html_document
+author: "Chengyu Ye"
+date: "2022-12-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# if errors, keep knitting
+knitr::opts_chunk$set(error = TRUE)
+
+# hide messages and warnings
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+## load required libraries
+
+```{r}
+library(Seurat)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(patchwork)
+library(umap)
+library(reticulate)
+library(scRepertoire)
+library(ggsci)
+```
+
+## prepare the R environment
+### set up working directory
+
+```{r}
+data_path <- "/Users/chengyuye/Library/CloudStorage/OneDrive-EmoryUniversity/Rotation_2_Li Lab/scRNA_TCR/Data/p22285-s001_Adipose-Tregs_WT-KO-mix"
+
+figure_path <- "/Users/chengyuye/Library/CloudStorage/OneDrive-EmoryUniversity/Rotation_2_Li Lab/scRNA_TCR/Figures/adipose_updated/"
+
+#setwd("/Users/chengyuye/Library/CloudStorage/OneDrive-EmoryUniversity/Rotation_2_Li Lab/scRNA_TCR/Data/p22285-s001_Adipose-Tregs_WT-KO-mix")
+```
+
+### Read in files from 10X CellRanger outputs
+
+```{r}
+adipo <- Read10X(data.dir = paste0(data_path,'/count/sample_filtered_feature_bc_matrix/'))
+
+## split the antibody capture matrix
+adipo_hto <- adipo$`Antibody Capture` %>% as.data.frame()
+
+# split the gene expression matrix
+adipo_gex <- adipo$`Gene Expression`
+
+
+```
+
+### check out the hashtags names
+```{r}
+rownames(adipo_hto)
+
+## check the cell number
+dim(adipo_hto)
+
+## remove the "Hash3Mouse_C0303_TotalSeqC" 
+adipo_hto <- adipo_hto[-3, ]
+
+## check the cell number
+dim(adipo_hto)
+```
+
+### Setup Seurat object
+```{r}
+## create seurat object
+adipo.hashtag <- CreateSeuratObject(counts = adipo_gex )
+
+## Add HTO data as a new assay independent from RNA
+adipo.hashtag[["HTO"]] <- CreateAssayObject(counts = adipo_hto)
+
+```
+
+## Quality control
+### Calculate the per-cell mitochondrial RNA content
+
+```{r}
+adipo.hashtag$percent.mt <- PercentageFeatureSet(adipo.hashtag, pattern = "^mt-") 
+
+
+adipo.hashtag$percent.rb <- PercentageFeatureSet(adipo.hashtag, pattern = "^Rp[ls]") 
+```
+
+### Visualize features before QC
+#### Using violin plot and correlation 
+
+```{r}
+VlnPlot(adipo.hashtag, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", 'percent.rb'), ncol = 2)
+```
+
+#### using scatterplot
+
+```{r, fig.width=12, fig.height=6}
+plot1 <- FeatureScatter(adipo.hashtag, feature1 = "nCount_RNA", feature2 = "percent.mt")
+
+plot2 <- FeatureScatter(adipo.hashtag, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+plot1 + plot2
+```
+pretty good correlation
+
+```{r}
+## create a function to visualize QC Metrics using scatter plots
+### scatter plots
+QC.scatter <- function(data){
+  scatter.plot <- ggplot(data[[]], aes( x = nCount_RNA, y = nFeature_RNA)) + 
+    geom_point(aes(colour = percent.mt), size = 1) + 
+    coord_cartesian(xlim = c(0.0 , 50000), ylim = c(0.0 , 10000)) +
+    labs(title = "Overall QC", x  ="Count depth", y = "Unique Genes") + 
+    theme(
+      plot.title = element_text(color = "black", size = 20 , face = "bold"),
+      axis.title.x = element_text(color = "black", size = 20, face = "bold"),
+      axis.title.y = element_text(color = "black", size = 20, face = "bold"),
+      legend.title = element_text(color = "black", size = 16, face = "bold", angle = 90)
+    ) +
+    scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "RdYlBu")),
+                           guide = guide_colourbar("Mitochondrial fraction", title.position = "right", title.vjust = 0.5, title.hjust = 0.5, barwidth = 1.0, barheight = 60))
+  
+  return(scatter.plot)
+}
+# histograms
+QC.histograms <- function(data){
+  histograms <- list()
+  
+  # distribution of genes per cell
+  hist1 <- qplot(x =data[["nFeature_RNA"]]$nFeature_RNA , fill=..count.., geom="histogram", binwidth = 100,
+                 xlab = "Unique genes per cell",
+                 ylab = "Frequency",
+                 main = "Gene Count Distribution")+scale_fill_gradient(low="lightblue", high="darkblue")
+  histograms[[1]] <- hist1
+  
+  # distribution of count depth
+  hist2 <- qplot(x =data[["nCount_RNA"]]$nCount_RNA, fill=..count.., geom="histogram", binwidth = 500,
+                 xlab = "Count depth per cell",
+                 ylab = "Frequency",
+                 main = "Transcript Count Distribution")+scale_fill_gradient(low="orange", high="red")
+  histograms[[2]] <- hist2
+  
+  # distribution of mitochondrial gene fraction
+  hist3 <- qplot(x =data[["percent.mt"]]$percent.mt, fill=..count.., geom="histogram", binwidth = 0.1,
+                 xlab = "Mitochondrial fraction per cell",
+                 ylab = "Frequency",
+                 main = "Mitochondrial Reads Fraction")+scale_fill_gradient(low="lightgreen", high="darkgreen")
+  histograms[[3]] <- hist3
+  return(histograms)
+}
+
+
+## QC scatter plot
+QC.scatter.raw <- QC.scatter(adipo.hashtag)
+print(QC.scatter.raw)
+
+## QC histogram
+QC.histogram.raw <- QC.histograms(adipo.hashtag)
+print(QC.histogram.raw)
+
+
+```
+
+
+set up QC criteria for this dataset:
+1. genes detected between 500-5000 (nFeature_rna)
+2. percentage of mitochondria transcripts < 10% (or 5%)
+3. percentage of ribosomal RNA > 5%
+
+### subset cells based on QC criteria
+
+```{r}
+## perform QC
+adipo.hashtag <- subset(adipo.hashtag, 
+                        subset = nFeature_RNA > 700 & nFeature_RNA < 5000 & percent.mt < 10 & percent.rb > 5)
+
+## check the cell number left ----- 7840 cells after QC 
+dim(adipo.hashtag)
+```
+
+### check out the matrices after QC
+
+```{r, fig.width=12, fig.height=6}
+
+VlnPlot(adipo.hashtag, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", 'percent.rb'), ncol = 2)
+
+plot3 <- FeatureScatter(adipo.hashtag, feature1 = "nCount_RNA", feature2 = "percent.mt")
+
+plot4 <- FeatureScatter(adipo.hashtag, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+plot3 + plot4
+```
+
+## Demultiplexing Hashtags
+In our study, hashtags were used to mark different groups. First, the hashtags will be normalized using Centered Log Ratio (CLR) normalization. After confirming proper enrichment for each hashtag, we will subset the data and split the groups for downstream analysis.
+
+### Normalize hashtag data
+
+```{r}
+# Normalize HTO data, here we use centered log-ratio (CLR) transformation
+adipo.hashtag <- NormalizeData(adipo.hashtag, 
+                               assay = "HTO", 
+                               normalization.method = "CLR")
+
+```
+
+### Demultiplex
+
+```{r}
+adipo.hashtag <- HTODemux(adipo.hashtag,
+                          assay = "HTO", 
+                          positive.quantile = 0.99)
+```
+1. Global classification - Indicates whether cells are unlabeled, singlets, or doublets.
+2. HTO max ID - Indicates the most likely ID based on hashtags.
+
+### check out the demultiplexed data
+
+```{r}
+table(adipo.hashtag$HTO_classification.global)
+adipo.hashtag@assays
+table(adipo.hashtag$hash.ID)
+```
+
+### Visualize hashtag demultiplexing
+
+```{r, fig.width=12, fig.height=6}
+
+print(RidgePlot(adipo.hashtag, assay = "HTO", features = rownames(adipo.hashtag[["HTO"]]), ncol = 2) & labs(y="", subtitle=names(adipo.hashtag)))
+```
+
+### Subset singlets
+subset only singlets for downstream analysis
+```{r}
+## remove nagative cells
+adipo.hashtag <- subset(adipo.hashtag, subset = `HTO_classification.global` == "Singlet")
+
+## check out the number of cells left ------ 7153 cells left after QC 
+dim(adipo.hashtag)
+
+```
+### split the hashtags
+
+```{r}
+# split the sample based on Ab
+### WT ---- 3429 cells before QC
+adipo_Hash1_C0301 <- subset(adipo.hashtag,
+                            subset = HTO_maxID == 'Hash1Mouse-C0301-TotalSeqC')
+
+## check the cell numbers ----- 3429 cells for the WT
+dim(adipo_Hash1_C0301)
+
+
+### Srebf2KO ---- 3724 cells before QC
+adipo_Hash2_C0302 <- subset(adipo.hashtag,
+                            subset = HTO_maxID == 'Hash2Mouse-C0302-TotalSeqC')
+
+## check the cell numbers ----- 3724 cells for the WT
+dim(adipo_Hash2_C0302)
+
+## add metadata
+adipo_Hash1_C0301$Group <- 'Srebf2WT'
+
+adipo_Hash2_C0302$Group <- 'Srebf2KO'
+
+```
+
+
+### save the data 
+
+```{r}
+### save the data
+saveRDS(adipo.hashtag, '../Data/processed_data/seurat_700/combined_hashtag_afterQC.rds')
+# # 
+saveRDS(adipo_Hash1_C0301, '../Data/processed_data/seurat_700/WT_adipose_afterQC.rds')
+# # 
+saveRDS(adipo_Hash2_C0302, '../Data/processed_data/seurat_700/Srebf2KO_adipose_afterQC.rds')
+
+
+```
+
